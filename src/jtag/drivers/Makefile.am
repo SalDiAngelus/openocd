@@ -93,6 +93,9 @@ endif
 if AT91RM9200
 DRIVERFILES += %D%/at91rm9200.c
 endif
+if PICOZED
+DRIVERFILES += %D%/picozed.c
+endif
 if GW16012
 DRIVERFILES += %D%/gw16012.c
 endif
