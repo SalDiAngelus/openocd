@@ -185,6 +185,8 @@ static int picozed_init(void)
 	 * Configure TDO as an input, and TDI, TCK, TMS, TRST, SRST
 	 * as outputs.  Drive TDI and TCK low, and TMS/TRST/SRST high.
 	 */
+	//JTAG_REG |= JTAG_SW; // PSOC
+	JTAG_REG &= ~JTAG_SW; // CPLD
 	picozed_write(0, 1, 0);
 	picozed_reset(1, 1);
 
