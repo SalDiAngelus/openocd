@@ -36,22 +36,20 @@
 #define JTAG_TCK  0x00000010
 
 struct device_t {
-	const char *name;
+	 const char *name;
 };
 
 static const struct device_t devices[] = {
-	{ "pcz_dev" },
+	{ "psoc" },
+	{ "cpld" },
 	{ .name = NULL },
 };
 
-/* configuration */
-static char *picozed_device;
-
 /* interface variables
  */
-static const struct device_t *device;
-static int dev_mem_fd;
-static volatile uint32_t * mmap_regbase;
+static const struct device_t *device = NULL;
+static int dev_mem_fd = -1;
+static volatile uint32_t * mmap_regbase = NULL;
 
 /* low level command set
  */
@@ -112,22 +110,64 @@ COMMAND_HANDLER(picozed_handle_device_command)
 	if (CMD_ARGC == 0)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	/* only if the device name wasn't overwritten by cmdline */
-	if (picozed_device == 0) {
-		picozed_device = malloc(strlen(CMD_ARGV[0]) + sizeof(char));
-		strcpy(picozed_device, CMD_ARGV[0]);
+
+	const struct device_t *cur_device = devices;
+
+	while (cur_device->name) {
+		if (strcmp(cur_device->name, CMD_ARGV[0]) == 0) {
+			device = cur_device;
+			break;
+		}
+		cur_device++;
+	}
+
+	if (!cur_device->name) {
+		LOG_ERROR("No matching device found for %s", CMD_ARGV[0]);
+		return ERROR_FAIL;
+	}
+	
+	if(dev_mem_fd < 0 || !mmap_regbase)
+	{
+		LOG_ERROR("JTAG pins have not been initialized");
+		return ERROR_FAIL;
+	}
+
+	LOG_WARNING("Device is %s", device->name);
+	if(device == &devices[0])
+	{
+		JTAG_REG |= JTAG_SW; // PSOC
+	}
+	else if(device == &devices[1])
+	{
+		JTAG_REG &= ~JTAG_SW; // CPLD
+	}
+	else
+	{
+		LOG_ERROR("Device not recognized");
+		return ERROR_FAIL;
 	}
 
 	return ERROR_OK;
 }
 
+static const struct command_registration picozed_exec_command_handlers[] = {
+	{
+		.name = "device",
+		.handler = &picozed_handle_device_command,
+		.mode = COMMAND_EXEC,
+		.help = "Set picozed device [default \"psoc\"]",
+		.usage = "piczed device <device>",
+	},
+	COMMAND_REGISTRATION_DONE
+};
+
 static const struct command_registration picozed_command_handlers[] = {
 	{
-		.name = "picozed_device",
-		.handler = &picozed_handle_device_command,
-		.mode = COMMAND_CONFIG,
-		.help = "Set picozed device [default \"pcz_dev\"]",
-		.usage = "<device>",
+		.name = "picozed",
+		.mode = COMMAND_ANY,
+		.help = "picozed command group",
+		.usage = "",
+		.chain = picozed_exec_command_handlers,
 	},
 	COMMAND_REGISTRATION_DONE
 };
@@ -143,28 +183,7 @@ struct jtag_interface picozed_interface = {
 
 static int picozed_init(void)
 {
-	const struct device_t *cur_device;
-
-	cur_device = devices;
-
-	if (picozed_device == NULL || picozed_device[0] == 0) {
-		picozed_device = "pcz_dev";
-		LOG_WARNING("No picozed device specified, using default 'pcz_dev'");
-	}
-
-	while (cur_device->name) {
-		if (strcmp(cur_device->name, picozed_device) == 0) {
-			device = cur_device;
-			break;
-		}
-		cur_device++;
-	}
-
-	if (!device) {
-		LOG_ERROR("No matching device found for %s", picozed_device);
-		return ERROR_JTAG_INIT_FAILED;
-	}
-
+	device = &devices[0];
 	bitbang_interface = &picozed_bitbang;
 
 	dev_mem_fd = open("/dev/lptdma0", O_RDWR);
@@ -185,8 +204,7 @@ static int picozed_init(void)
 	 * Configure TDO as an input, and TDI, TCK, TMS, TRST, SRST
 	 * as outputs.  Drive TDI and TCK low, and TMS/TRST/SRST high.
 	 */
-	//JTAG_REG |= JTAG_SW; // PSOC
-	JTAG_REG &= ~JTAG_SW; // CPLD
+	JTAG_REG |= JTAG_SW; // PSOC
 	picozed_write(0, 1, 0);
 	picozed_reset(1, 1);
 

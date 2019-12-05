@@ -238,7 +238,7 @@ AC_ARG_ADAPTERS([
   HIDAPI_USB1_ADAPTERS,
   LIBFTDI_ADAPTERS,
   LIBJAYLINK_ADAPTERS
-  ],[auto])
+  ],[no])
 
 AC_ARG_ENABLE([parport],
   AS_HELP_STRING([--enable-parport], [Enable building the pc parallel port driver]),

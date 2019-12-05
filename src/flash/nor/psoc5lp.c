@@ -24,6 +24,7 @@
 #include "imp.h"
 #include <helper/time_support.h>
 #include <target/armv7m.h>
+#include <stdbool.h>
 
 #define PM_ACT_CFG0             0x400043A0
 #define PM_ACT_CFG12            0x400043AC
@@ -118,6 +119,22 @@ struct psoc5lp_device {
 	unsigned flash_kb;
 	unsigned eeprom_kb;
 };
+
+static const int CFG_BYTES_PER_FLASH_ROW = 32;
+static const int FLASH_BYTES_PER_FILE_ROW = 64;
+static const int CODE_BYTES_PER_FLASH_ROW = 256;
+static const int FLASH_DATA_HEADER_LENGTH = 9;
+static const int MAX_FLASH_LINES = 1024;
+static const int HEX_FILE_LINES_PER_FLASH_ROW = 4;
+static const int HEX_FILE_RECORD_TYPE_CHAR_0_INDEX = 7;
+static const int HEX_FILE_RECORD_TYPE_CHAR_1_INDEX = 8;
+static const int HEX_FILE_DATA_CHAR_0_INDEX = 9;
+static const char HEX_FILE_DATA_RECORD_CHAR_0 = '0';
+static const char HEX_FILE_DATA_RECORD_CHAR_1 = '0';
+static const char HEX_FILE_EXTEND_LINEAR_RECORD_CHAR_0 = '0';
+static const char HEX_FILE_EXTEND_LINEAR_RECORD_CHAR_1 = '4';
+static const char HEX_FILE_EXTENDED_ADDR_NON_FLASH_REGION = '8';
+static const char* config_region_start = ":0200000480007A\r\n";
 
 /*
  * Device information collected from datasheets.
@@ -350,7 +367,7 @@ static int psoc5lp_spc_busy_wait_idle(struct target *target)
 	int retval;
 
 	retval = target_read_u8(target, SPC_SR, &sr); /* dummy read */
-	if (retval != ERROR_OK)
+	if (retval != ERROR_OK || sr == SPC_SR_IDLE)
 		return retval;
 
 	endtime = timeval_ms() + 1000; /* 1 second timeout */
@@ -1487,6 +1504,295 @@ static int psoc5lp_auto_probe(struct flash_bank *bank)
 	return psoc5lp_probe(bank);
 }
 
+static bool get_line(const char* buffer, const int buffer_sz, const char** start, int* length)
+{
+	if(*start == NULL)
+		*start = buffer;
+	else
+	{
+		*start += *length;
+	}
+
+	const char* loc = memmem(*start, buffer_sz - (*start - buffer), "\r\n", 2);
+
+	if(loc != NULL)
+	{
+		*length = (int)(loc - *start) + 2;
+		return true;
+	}
+	else
+	{
+		*length = -1;
+		return false;
+	}
+}
+
+static void write_val(const char* in_buf, uint8_t* out_buf)
+{
+	char byte_str[3] = {0};
+	memcpy(byte_str, in_buf, 2);
+	*out_buf = strtol(byte_str, NULL, 16);
+}
+
+static void write_data_line(const char* in_buf, uint8_t* out_buf)
+{
+	for(int i = 0; i < FLASH_BYTES_PER_FILE_ROW; i++)
+	{
+		write_val(in_buf + FLASH_DATA_HEADER_LENGTH + (i * 2), out_buf + i);
+	}
+}
+
+static void write_config_line(const char* in_buf, uint8_t* out_buf)
+{
+	for(int i = 0; i < CFG_BYTES_PER_FLASH_ROW; i++)
+	{
+		write_val(in_buf + (i * 2), out_buf + i);
+	}
+}
+
+static int extract_code_from_image(const char* file_name, uint8_t*** flash_data_out, int* num_flash_lines_out, int* num_bytes_per_line_out)
+{
+	FILE* hex_fh = NULL;
+	char* hex_buf = NULL;
+	uint8_t** flash_data = NULL;
+	int num_flash_lines = 0;
+	int num_bytes_per_line = CODE_BYTES_PER_FLASH_ROW;
+	int retval = ERROR_FAIL;
+
+	// Validate input
+	hex_fh = fopen(file_name, "r");
+	if(!hex_fh) goto end;
+
+	// read hex file into buffer
+	fseek(hex_fh, 0L, SEEK_END);
+	int hex_sz = ftell(hex_fh);
+	rewind(hex_fh);
+	hex_buf = malloc(hex_sz);
+	if(!hex_buf) goto end;
+	size_t num_read = fread(hex_buf, 1, hex_sz, hex_fh);
+	if((int)num_read != hex_sz) goto end;
+
+	flash_data = malloc(MAX_FLASH_LINES * sizeof(uint8_t*));
+	if(!flash_data) goto end;
+
+	// extract code segment from buffer
+	bool ecc_enabled = true;
+	bool first_time_cfg_read = true;
+
+	const char* config_line_start = memmem(hex_buf, hex_sz, config_region_start, strlen(config_region_start));
+	int config_line_length = 0;
+	if(config_line_start != NULL)
+	{
+		ecc_enabled = false;
+		config_line_start += strlen(config_region_start);
+		num_bytes_per_line += CFG_BYTES_PER_FLASH_ROW;
+	}
+
+	const char* line_start = NULL;
+	int line_length = 0;
+	while(get_line(hex_buf, hex_sz, &line_start, &line_length) && num_flash_lines < MAX_FLASH_LINES)
+	{
+		// Check control characters indicating data sections
+		if(line_start[HEX_FILE_RECORD_TYPE_CHAR_0_INDEX] == HEX_FILE_EXTEND_LINEAR_RECORD_CHAR_0 && line_start[HEX_FILE_RECORD_TYPE_CHAR_1_INDEX] == HEX_FILE_EXTEND_LINEAR_RECORD_CHAR_1)
+		{
+			if(line_start[HEX_FILE_DATA_CHAR_0_INDEX] >= HEX_FILE_EXTENDED_ADDR_NON_FLASH_REGION)
+				break;
+			else
+				continue;
+		}
+		else if(!(line_start[HEX_FILE_RECORD_TYPE_CHAR_0_INDEX] == HEX_FILE_DATA_RECORD_CHAR_0 && line_start[HEX_FILE_RECORD_TYPE_CHAR_1_INDEX] == HEX_FILE_DATA_RECORD_CHAR_1))
+		{
+			break;
+		}
+
+		uint8_t* line_buf = malloc(num_bytes_per_line);
+		if(!line_buf) goto end;
+
+		// Write 4 data lines at a time so ecc bytes can be appended per 256 bytes if needed
+		write_data_line(line_start, line_buf);
+
+		for(int i = 1; i < HEX_FILE_LINES_PER_FLASH_ROW; i++)
+		{
+			get_line(hex_buf, hex_sz, &line_start, &line_length);
+			write_data_line(line_start, line_buf + (FLASH_BYTES_PER_FILE_ROW * i));
+		}
+
+		// A single line of ecc bytes has data for 8 flash lines, so we need to advance the config line every other set of 4 flash lines
+		if(!ecc_enabled)
+		{
+			const char* config_line_buf = NULL;
+			if(first_time_cfg_read)
+			{
+				get_line(hex_buf, hex_sz, &config_line_start, &config_line_length);
+				config_line_buf = config_line_start + FLASH_DATA_HEADER_LENGTH;
+			}
+			else
+			{
+				config_line_buf = config_line_start + FLASH_DATA_HEADER_LENGTH + (CFG_BYTES_PER_FLASH_ROW * 2);
+			}
+			first_time_cfg_read = !first_time_cfg_read;
+
+			write_config_line(config_line_buf, line_buf + (FLASH_BYTES_PER_FILE_ROW * 4));
+		}
+
+		flash_data[num_flash_lines] = line_buf;
+		num_flash_lines++;
+	}
+
+	retval = ERROR_OK;
+
+end:
+	if(hex_fh)
+		fclose(hex_fh);
+	if(hex_buf)
+		free(hex_buf);
+	if(flash_data && retval != ERROR_OK)
+	{
+		for(int i = 0; i < num_flash_lines; i++) if(flash_data[i]) free(flash_data[i]);
+		free(flash_data);
+		flash_data = NULL;
+	}
+
+	*flash_data_out = flash_data;
+	*num_flash_lines_out = num_flash_lines;
+	*num_bytes_per_line_out = num_bytes_per_line;
+
+	return retval;
+}
+
+static int write_code_to_flash(struct flash_bank *bank, uint8_t** buffer, const int num_flash_lines, const int num_bytes_per_line)
+{
+	struct target *target = bank->target;
+	struct working_area *code_area, *even_row_area, *odd_row_area;
+	uint8_t temp[2], buf[12];
+	unsigned array_id = 0;
+
+	int retval = psoc5lp_spc_get_temp(target, 3, temp);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Unable to read Die temperature");
+		return retval;
+	}
+	LOG_DEBUG("Get_Temp: sign 0x%02" PRIx8 ", magnitude 0x%02" PRIx8,
+		temp[0], temp[1]);
+
+	assert(target_get_working_area_avail(target) == target->working_area_size);
+	retval = target_alloc_working_area(target,
+			target_get_working_area_avail(target) / 2, &code_area);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Could not allocate working area for program SRAM");
+		return retval;
+	}
+	assert(code_area->address < 0x20000000);
+
+	retval = target_alloc_working_area(target,
+			SPC_OPCODE_LEN + 1 + num_bytes_per_line + 3 + SPC_OPCODE_LEN + 6,
+			&even_row_area);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Could not allocate working area for even row");
+		goto err_alloc_even;
+	}
+	assert(even_row_area->address >= 0x20000000);
+
+	retval = target_alloc_working_area(target, even_row_area->size,
+			&odd_row_area);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("Could not allocate working area for odd row");
+		goto err_alloc_odd;
+	}
+	assert(odd_row_area->address >= 0x20000000);
+
+	for(int row = 0; row < num_flash_lines; row++) { 
+		bool even_row = (row % 2 == 0); 
+		struct working_area *data_area = even_row ? even_row_area : odd_row_area; 
+ 
+		LOG_DEBUG("Writing load command for array %u row %u at " TARGET_ADDR_FMT, 
+			array_id, row, data_area->address); 
+ 
+		psoc5lp_spc_write_opcode_buffer(target, buf, SPC_LOAD_ROW); 
+		buf[SPC_OPCODE_LEN] = array_id; 
+		retval = target_write_buffer(target, data_area->address, 4, buf); 
+		if (retval != ERROR_OK) 
+			goto err_write; 
+ 
+		retval = target_write_buffer(target, 
+			data_area->address + SPC_OPCODE_LEN + 1, 
+			num_bytes_per_line, buffer[row]); 
+		if (retval != ERROR_OK) 
+			goto err_write; 
+ 
+		for (int i = 0; i < 3; i++) 
+			buf[i] = 0x00; /* 3 NOPs for short delay */ 
+		psoc5lp_spc_write_opcode_buffer(target, buf + 3, SPC_PRG_ROW); 
+		buf[3 + SPC_OPCODE_LEN] = array_id; 
+		buf[3 + SPC_OPCODE_LEN + 1] = row >> 8; 
+		buf[3 + SPC_OPCODE_LEN + 2] = row & 0xff; 
+		memcpy(buf + 3 + SPC_OPCODE_LEN + 3, temp, 2); 
+		buf[3 + SPC_OPCODE_LEN + 5] = 0x00; /* padding */ 
+		retval = target_write_buffer(target, 
+			data_area->address + SPC_OPCODE_LEN + 1 + num_bytes_per_line, 
+			12, buf); 
+		if (retval != ERROR_OK) 
+			goto err_write; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_CH0_BASIC_STATUS : PHUB_CH1_BASIC_STATUS, 
+			(even_row ? 0 : 1) << 8); 
+		if (retval != ERROR_OK) 
+			goto err_dma; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_CH0_BASIC_CFG : PHUB_CH1_BASIC_CFG, 
+			PHUB_CHx_BASIC_CFG_WORK_SEP | PHUB_CHx_BASIC_CFG_EN); 
+		if (retval != ERROR_OK) 
+			goto err_dma; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_CFGMEM0_CFG0 : PHUB_CFGMEM1_CFG0, 
+			PHUB_CFGMEMx_CFG0); 
+		if (retval != ERROR_OK) 
+			goto err_dma; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_CFGMEM0_CFG1 : PHUB_CFGMEM1_CFG1, 
+			((SPC_CPU_DATA >> 16) << 16) | (data_area->address >> 16)); 
+		if (retval != ERROR_OK) 
+			goto err_dma; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_TDMEM0_ORIG_TD0 : PHUB_TDMEM1_ORIG_TD0, 
+			PHUB_TDMEMx_ORIG_TD0_INC_SRC_ADDR | 
+			PHUB_TDMEMx_ORIG_TD0_NEXT_TD_PTR_LAST | 
+			((SPC_OPCODE_LEN + 1 + num_bytes_per_line + 3 + SPC_OPCODE_LEN + 5) & 0xfff)); 
+		if (retval != ERROR_OK) 
+			goto err_dma; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_TDMEM0_ORIG_TD1 : PHUB_TDMEM1_ORIG_TD1, 
+			((SPC_CPU_DATA & 0xffff) << 16) | (data_area->address & 0xffff)); 
+		if (retval != ERROR_OK) 
+			goto err_dma; 
+ 
+		retval = target_write_u32(target, 
+			even_row ? PHUB_CH0_ACTION : PHUB_CH1_ACTION, 
+			PHUB_CHx_ACTION_CPU_REQ); 
+		if (retval != ERROR_OK) 
+			goto err_dma_action; 
+	}
+
+	retval = psoc5lp_spc_busy_wait_idle(target);
+
+err_dma_action:
+err_dma:
+err_write:
+	target_free_working_area(target, odd_row_area);
+err_alloc_odd:
+	target_free_working_area(target, even_row_area);
+err_alloc_even:
+	target_free_working_area(target, code_area);
+
+	return retval;
+}
+
 COMMAND_HANDLER(psoc5lp_handle_mass_erase_command)
 {
 	struct flash_bank *bank;
@@ -1504,6 +1810,76 @@ COMMAND_HANDLER(psoc5lp_handle_mass_erase_command)
 		command_print(CMD, "PSoC 5LP erase succeeded");
 	else
 		command_print(CMD, "PSoC 5LP erase failed");
+
+	return retval;
+}
+
+COMMAND_HANDLER(psoc5lp_handle_parse_hex_command)
+{
+	if (CMD_ARGC != 2)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	LOG_INFO("Parsing image file %s.", CMD_ARGV[0]);
+
+	uint8_t** flash_data = NULL;
+	int num_flash_lines = 0;
+	int num_bytes_per_flash_line = 0;
+
+	int retval = extract_code_from_image(CMD_ARGV[0], &flash_data, &num_flash_lines, &num_bytes_per_flash_line);
+	if(retval != ERROR_OK)
+		return retval;
+
+	FILE* out_fh = fopen(CMD_ARGV[1], "w");
+	if(!out_fh)
+		return ERROR_FAIL;
+
+	for(int i = 0; i < num_flash_lines; i++)
+		fwrite(flash_data[i], 1, num_bytes_per_flash_line, out_fh);
+
+	fclose(out_fh);
+	if(flash_data)
+	{
+		for(int i = 0; i < num_flash_lines; i++) if(flash_data[i]) free(flash_data[i]);
+		free(flash_data);
+	}
+
+	LOG_INFO("Parsing complete. Wrote to %s.", CMD_ARGV[1]);
+	return ERROR_OK;
+}
+
+COMMAND_HANDLER(psoc5lp_handle_write_image_command)
+{
+	if (CMD_ARGC != 2)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	LOG_INFO("Writing image file %s.", CMD_ARGV[1]);
+
+	uint8_t** flash_data = NULL;
+	int num_flash_lines = 0;
+	int num_bytes_per_flash_line = 0;
+
+	int retval = extract_code_from_image(CMD_ARGV[1], &flash_data, &num_flash_lines, &num_bytes_per_flash_line);
+	if(retval != ERROR_OK)
+		return retval;
+
+	LOG_INFO("Extracting image file success with %d flash lines and %d bytes per line.", num_flash_lines, num_bytes_per_flash_line);
+
+	struct flash_bank *bank;
+	retval = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &bank);
+	if(retval != ERROR_OK)
+		goto write_cmd_end;
+
+	LOG_INFO("Using flash bank %s.", bank->name);
+	retval = write_code_to_flash(bank, flash_data, num_flash_lines, num_bytes_per_flash_line);
+
+	LOG_INFO("Writing image file to flash success.");
+
+write_cmd_end:
+	if(flash_data)
+	{
+		for(int i = 0; i < num_flash_lines; i++) if(flash_data[i]) free(flash_data[i]);
+		free(flash_data);
+	}
 
 	return retval;
 }
@@ -1533,6 +1909,20 @@ static const struct command_registration psoc5lp_exec_command_handlers[] = {
 		.help = "Erase all flash data and ECC/configuration bytes, "
 			"all flash protection rows, "
 			"and all row latches in all flash arrays on the device.",
+	},
+	{
+		.name = "parse_hex",
+		.handler = psoc5lp_handle_parse_hex_command,
+		.mode = COMMAND_EXEC,
+		.usage = "hex_file output_file",
+		.help = "Extract data needed to program the Psoc and store it in the output file.",
+	},
+	{
+		.name = "write_image",
+		.handler = psoc5lp_handle_write_image_command,
+		.mode = COMMAND_EXEC,
+		.usage = "bank_id hex_file",
+		.help = "Write hex file to psoc.",
 	},
 	COMMAND_REGISTRATION_DONE
 };
