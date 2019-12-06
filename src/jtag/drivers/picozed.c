@@ -26,30 +26,36 @@
 #include <sys/mman.h>
 
 /* PICOZED */
-#define JTAG_REG mmap_regbase[26]
-
-#define JTAG_TDO  0x80000000
-#define JTAG_TDI  0x00000001
-#define JTAG_SW   0x00000002
-#define JTAG_TRST 0x00000004
-#define JTAG_TMS  0x00000008
-#define JTAG_TCK  0x00000010
-
-struct device_t {
-	 const char *name;
+union jtag_pins
+{
+	int arr[10];
+	struct jtag_pin_names
+	{
+		int tdo_byte;
+		int tdo_bit;
+		int tdi_byte;
+		int tdi_bit;
+		int trst_byte;
+		int trst_bit;
+		int tms_byte;
+		int tms_bit;
+		int tck_byte;
+		int tck_bit;
+	};
 };
 
-static const struct device_t devices[] = {
-	{ "psoc" },
-	{ "cpld" },
-	{ .name = NULL },
+struct jtag_setup
+{
+	char* file_name;
+	int file_size;
+	struct jtag_pins pins;
 };
 
 /* interface variables
  */
-static const struct device_t *device = NULL;
 static int dev_mem_fd = -1;
-static volatile uint32_t * mmap_regbase = NULL;
+static volatile char * mmap_regbase = NULL;
+static struct jtag_setup setup_info = {0};
 
 /* low level command set
  */
@@ -69,28 +75,26 @@ static struct bitbang_interface picozed_bitbang = {
 
 static bb_value_t picozed_read(void)
 {
-	return (JTAG_REG & JTAG_TDO) ? BB_HIGH : BB_LOW;
+	return ((mmap_regbase[setup_info.tdo_byte] >> tdo_bit) & 1) ? B_HIGH : BB_LOW;
 }
 
 static int picozed_write(int tck, int tms, int tdi)
 {
-	uint32_t val = JTAG_REG;
 	if (tck)
-		val |= JTAG_TCK;
+		mmap_regbase[setup_info.tck_byte] |= 1 << setup_info.tck_bit;
 	else
-		val &= ~JTAG_TCK;
+		mmap_regbase[setup_info.tck_byte] &= ~(1 << setup_info.tck_bit);
 
-	if (tms)
-		val |= JTAG_TMS;
+	if (tck)
+		mmap_regbase[setup_info.tms_byte] |= 1 << setup_info.tms_bit;
 	else
-		val &= ~JTAG_TMS;
+		mmap_regbase[setup_info.tms_byte] &= ~(1 << setup_info.tms_bit);
 
-	if (tdi)
-		val |= JTAG_TDI;
+	if (tck)
+		mmap_regbase[setup_info.tdi_byte] |= 1 << setup_info.tdi_bit;
 	else
-		val &= ~JTAG_TDI;
+		mmap_regbase[setup_info.tdi_byte] &= ~(1 << setup_info.tdi_bit);
 
-	JTAG_REG = val;
 	return ERROR_OK;
 }
 
@@ -98,65 +102,90 @@ static int picozed_write(int tck, int tms, int tdi)
 static int picozed_reset(int trst, int srst)
 {
 	if (trst == 0)
-		JTAG_REG |= JTAG_TRST;
+		mmap_regbase[setup_info.trst_byte] |= 1 << setup_info.trst_bit;
 	else if (trst == 1)
-		JTAG_REG &= ~JTAG_TRST;
+		mmap_regbase[setup_info.trst_byte] &= ~(1 << setup_info.trst_bit);
 
 	return ERROR_OK;
 }
 
-COMMAND_HANDLER(picozed_handle_device_command)
+static int picozed_init(void)
 {
-	if (CMD_ARGC == 0)
-		return ERROR_COMMAND_SYNTAX_ERROR;
+	bitbang_interface = &picozed_bitbang;
 
-
-	const struct device_t *cur_device = devices;
-
-	while (cur_device->name) {
-		if (strcmp(cur_device->name, CMD_ARGV[0]) == 0) {
-			device = cur_device;
-			break;
-		}
-		cur_device++;
+	dev_mem_fd = open(setup_info.file_name, O_RDWR);
+	if (dev_mem_fd < 0) {
+		LOG_ERROR("Cannot open memory mapped file %s,", setup_info.file_name);
+		return ERROR_JTAG_INIT_FAILED;
 	}
 
-	if (!cur_device->name) {
-		LOG_ERROR("No matching device found for %s", CMD_ARGV[0]);
-		return ERROR_FAIL;
+	mmap_regbase = (char *)mmap(NULL, setup_info.file_size, PROT_READ | PROT_WRITE, MAP_SHARED, dev_mem_fd, 0);
+	if (mmap_regbase == MAP_FAILED) {
+		LOG_ERROR("Cannot allocate space for memory mapped file.");
+		close(dev_mem_fd);
+		return ERROR_JTAG_INIT_FAILED;
 	}
-	
-	if(dev_mem_fd < 0 || !mmap_regbase)
+
+
+	//JTAG_REG |= JTAG_SW; // PSOC
+	picozed_write(0, 1, 0);
+	picozed_reset(1, 1);
+
+	return ERROR_OK;
+}
+
+static int picozed_quit(void)
+{
+	if(mmap_regbase && mmap_regbase != MAP_FAILED)
 	{
-		LOG_ERROR("JTAG pins have not been initialized");
-		return ERROR_FAIL;
+		munmap(mmap_regbase, setup_info.file_size);
+		mmap_regbase = NULL;
 	}
 
-	LOG_WARNING("Device is %s", device->name);
-	if(device == &devices[0])
+	if(dev_mem_fd >= 0)
 	{
-		JTAG_REG |= JTAG_SW; // PSOC
+		close(dev_mem_fd);
+		dev_mem_fd = -1;
 	}
-	else if(device == &devices[1])
+
+	if(setup_info.file_name)
 	{
-		JTAG_REG &= ~JTAG_SW; // CPLD
-	}
-	else
-	{
-		LOG_ERROR("Device not recognized");
-		return ERROR_FAIL;
+		free(setup_info.file_name)
+		setup_info.file_name = NULL;
 	}
 
 	return ERROR_OK;
+}
+
+COMMAND_HANDLER(picozed_handle_config_command)
+{
+	if (CMD_ARGC != 12)
+	{
+		LOG_ERROR("Invalid number of arguments");
+		return ERROR_COMMAND_SYNTAX_ERROR;
+	}
+
+	int fn_len = strlen(CMD_ARGV[0]);
+	jtag_setup.file_name = malloc(fn_len);
+	if(!jtag_setup.file_name)
+		return ERROR_FAIL;
+	memcpy(jtag_setup.file_name, CMD_ARGV[0], fn_len);
+
+	jtag_setup.file_size = atoi(CMD_ARGV[1]);
+
+	for(int i = 0; i < 10; i++)
+		jtag_setup.pins.arr[i] = atoi(CMD_ARGV[i + 2]);
 }
 
 static const struct command_registration picozed_exec_command_handlers[] = {
 	{
-		.name = "device",
-		.handler = &picozed_handle_device_command,
-		.mode = COMMAND_EXEC,
-		.help = "Set picozed device [default \"psoc\"]",
-		.usage = "piczed device <device>",
+		.name = "config",
+		.handler = &picozed_handle_config_command,
+		.mode = COMMAND_CONFIG,
+		.help = "Set memory map and pin configuration.\n"
+			"Byte and bit positions must be base 10 integer and represent a byte offset from the beginning of the file and the bit position in that byte.\n"
+			"For example, byte 1 and bit 7 is the most siginificant bit of the second byte of the memory mapped file.\n",
+		.usage = "<memory mapped file name> <memory mapped file size> <TDO byte> <TDO bit> <TDI byte> <TDI bit> <TRST byte> <TRST bit> <TMS byte> <TMS bit> <TCK byte> <TCK bit>",
 	},
 	COMMAND_REGISTRATION_DONE
 };
@@ -180,38 +209,3 @@ struct jtag_interface picozed_interface = {
 	.init = picozed_init,
 	.quit = picozed_quit,
 };
-
-static int picozed_init(void)
-{
-	device = &devices[0];
-	bitbang_interface = &picozed_bitbang;
-
-	dev_mem_fd = open("/dev/lptdma0", O_RDWR);
-	if (dev_mem_fd < 0) {
-		perror("open");
-		return ERROR_JTAG_INIT_FAILED;
-	}
-
-	mmap_regbase = (uint32_t *)mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-				MAP_SHARED, dev_mem_fd, 0);
-	if (mmap_regbase == MAP_FAILED) {
-		perror("mmap");
-		close(dev_mem_fd);
-		return ERROR_JTAG_INIT_FAILED;
-	}
-
-	/*
-	 * Configure TDO as an input, and TDI, TCK, TMS, TRST, SRST
-	 * as outputs.  Drive TDI and TCK low, and TMS/TRST/SRST high.
-	 */
-	JTAG_REG |= JTAG_SW; // PSOC
-	picozed_write(0, 1, 0);
-	picozed_reset(1, 1);
-
-	return ERROR_OK;
-}
-
-static int picozed_quit(void)
-{
-	return ERROR_OK;
-}
