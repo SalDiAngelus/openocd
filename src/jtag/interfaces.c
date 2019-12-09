@@ -72,8 +72,8 @@ extern struct jtag_interface ep93xx_interface;
 #if BUILD_AT91RM9200 == 1
 extern struct jtag_interface at91rm9200_interface;
 #endif
-#if BUILD_PICOZED == 1
-extern struct jtag_interface picozed_interface;
+#if BUILD_MMAP_GPIO == 1
+extern struct jtag_interface mmap_gpio_interface;
 #endif
 #if BUILD_GW16012 == 1
 extern struct jtag_interface gw16012_interface;
@@ -180,8 +180,8 @@ struct jtag_interface *jtag_interfaces[] = {
 #if BUILD_AT91RM9200 == 1
 		&at91rm9200_interface,
 #endif
-#if BUILD_PICOZED == 1
-		&picozed_interface,
+#if BUILD_MMAP_GPIO == 1
+		&mmap_gpio_interface,
 #endif
 #if BUILD_GW16012 == 1
 		&gw16012_interface,

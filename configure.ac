@@ -298,9 +298,9 @@ AS_CASE(["${host_cpu}"],
     build_imx_gpio=no
 ])
 
-AC_ARG_ENABLE([picozed],
-  AS_HELP_STRING([--enable-picozed], [Enable building support for picozed based SBCs]),
-  [build_picozed=$enableval], [build_picozed=no])
+AC_ARG_ENABLE([mmap_gpio],
+  AS_HELP_STRING([--enable-mmap_gpio], [Enable building support for gpio based jtag that is accessed through a memory mapped file.]),
+  [build_mmap_gpio=$enableval], [build_mmap_gpio=no])
 
 AC_ARG_ENABLE([gw16012],
   AS_HELP_STRING([--enable-gw16012], [Enable building support for the Gateworks GW16012 JTAG Programmer]),
@@ -506,11 +506,11 @@ AS_IF([test "x$build_at91rm9200" = "xyes"], [
   AC_DEFINE([BUILD_AT91RM9200], [0], [0 if you don't want at91rm9200.])
 ])
 
-AS_IF([test "x$build_picozed" = "xyes"], [
+AS_IF([test "x$build_mmap_gpio" = "xyes"], [
   build_bitbang=yes
-  AC_DEFINE([BUILD_PICOZED], [1], [1 if you want picozed.])
+  AC_DEFINE([BUILD_MMAP_GPIO], [1], [1 if you want memory mapped gpio.])
 ], [
-  AC_DEFINE([BUILD_PICOZED], [0], [0 if you don't want picozed.])
+  AC_DEFINE([BUILD_MMAP_GPIO], [0], [0 if you don't want memory mapped gpio.])
 ])
 
 AS_IF([test "x$build_bcm2835gpio" = "xyes"], [
@@ -699,7 +699,7 @@ AM_CONDITIONAL([ZY1000], [test "x$build_zy1000" = "xyes"])
 AM_CONDITIONAL([ZY1000_MASTER], [test "x$build_zy1000_master" = "xyes"])
 AM_CONDITIONAL([IOUTIL], [test "x$build_ioutil" = "xyes"])
 AM_CONDITIONAL([AT91RM9200], [test "x$build_at91rm9200" = "xyes"])
-AM_CONDITIONAL([PICOZED], [test "x$build_picozed" = "xyes"])
+AM_CONDITIONAL([MMAP_GPIO], [test "x$build_mmap_gpio" = "xyes"])
 AM_CONDITIONAL([BCM2835GPIO], [test "x$build_bcm2835gpio" = "xyes"])
 AM_CONDITIONAL([IMX_GPIO], [test "x$build_imx_gpio" = "xyes"])
 AM_CONDITIONAL([BITBANG], [test "x$build_bitbang" = "xyes"])
