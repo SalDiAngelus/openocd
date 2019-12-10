@@ -52,7 +52,6 @@ endif
 	%D%/flash/libflash.la \
 	%D%/target/libtarget.la \
 	%D%/server/libserver.la \
-	%D%/rtos/librtos.la \
 	%D%/helper/libhelper.la
 
 BIN2C = $(srcdir)/%D%/helper/bin2char.sh
@@ -79,7 +78,6 @@ include %D%/transport/Makefile.am
 include %D%/xsvf/Makefile.am
 include %D%/svf/Makefile.am
 include %D%/target/Makefile.am
-include %D%/rtos/Makefile.am
 include %D%/server/Makefile.am
 include %D%/flash/Makefile.am
 include %D%/pld/Makefile.am

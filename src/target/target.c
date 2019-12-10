@@ -76,80 +76,10 @@ static int target_profiling_default(struct target *target, uint32_t *samples,
 		uint32_t max_num_samples, uint32_t *num_samples, uint32_t seconds);
 
 /* targets */
-extern struct target_type arm7tdmi_target;
-extern struct target_type arm720t_target;
-extern struct target_type arm9tdmi_target;
-extern struct target_type arm920t_target;
-extern struct target_type arm966e_target;
-extern struct target_type arm946e_target;
-extern struct target_type arm926ejs_target;
-extern struct target_type fa526_target;
-extern struct target_type feroceon_target;
-extern struct target_type dragonite_target;
-extern struct target_type xscale_target;
 extern struct target_type cortexm_target;
-extern struct target_type cortexa_target;
-extern struct target_type aarch64_target;
-extern struct target_type cortexr4_target;
-extern struct target_type arm11_target;
-extern struct target_type ls1_sap_target;
-extern struct target_type mips_m4k_target;
-extern struct target_type mips_mips64_target;
-extern struct target_type avr_target;
-extern struct target_type dsp563xx_target;
-extern struct target_type dsp5680xx_target;
-extern struct target_type testee_target;
-extern struct target_type avr32_ap7k_target;
-extern struct target_type hla_target;
-extern struct target_type nds32_v2_target;
-extern struct target_type nds32_v3_target;
-extern struct target_type nds32_v3m_target;
-extern struct target_type or1k_target;
-extern struct target_type quark_x10xx_target;
-extern struct target_type quark_d20xx_target;
-extern struct target_type stm8_target;
-extern struct target_type riscv_target;
-extern struct target_type mem_ap_target;
-extern struct target_type esirisc_target;
 
 static struct target_type *target_types[] = {
-	&arm7tdmi_target,
-	&arm9tdmi_target,
-	&arm920t_target,
-	&arm720t_target,
-	&arm966e_target,
-	&arm946e_target,
-	&arm926ejs_target,
-	&fa526_target,
-	&feroceon_target,
-	&dragonite_target,
-	&xscale_target,
 	&cortexm_target,
-	&cortexa_target,
-	&cortexr4_target,
-	&arm11_target,
-	&ls1_sap_target,
-	&mips_m4k_target,
-	&avr_target,
-	&dsp563xx_target,
-	&dsp5680xx_target,
-	&testee_target,
-	&avr32_ap7k_target,
-	&hla_target,
-	&nds32_v2_target,
-	&nds32_v3_target,
-	&nds32_v3m_target,
-	&or1k_target,
-	&quark_x10xx_target,
-	&quark_d20xx_target,
-	&stm8_target,
-	&riscv_target,
-	&mem_ap_target,
-	&esirisc_target,
-#if BUILD_TARGET64
-	&aarch64_target,
-	&mips_mips64_target,
-#endif
 	NULL,
 };
 
